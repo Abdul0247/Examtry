@@ -13,7 +13,7 @@ export const Route = createFileRoute("/student-login")({
   head: () => ({
     meta: [
       { title: "Student Login — ExamHub" },
-      { name: "description", content: "Enter your access code and student number to begin." },
+      { name: "description", content: "Enter your access code, student number, and name to begin." },
     ],
   }),
   component: StudentLoginPage,
@@ -24,14 +24,21 @@ function StudentLoginPage() {
   const start = useServerFn(studentStartExam);
   const [accessCode, setAccessCode] = useState("");
   const [studentNumber, setStudentNumber] = useState("");
+  const [fullName, setFullName] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const canStart = accessCode.trim() && studentNumber.trim() && fullName.trim();
+
   const handleStart = async () => {
-    if (!accessCode.trim() || !studentNumber.trim()) return;
+    if (!canStart) return;
     setBusy(true);
     try {
       const result = await start({
-        data: { access_code: accessCode, student_number: studentNumber },
+        data: {
+          access_code: accessCode,
+          student_number: studentNumber,
+          full_name: fullName.trim(),
+        },
       });
       navigate({ to: "/exam", search: { sid: result.submission_id } });
     } catch (e) {
@@ -52,7 +59,7 @@ function StudentLoginPage() {
             </div>
             <h1 className="text-2xl font-bold text-foreground">Start Your Exam</h1>
             <p className="mt-2 text-muted-foreground">
-              Enter the access code and your student number
+              Enter the access code, your student number, and your full name
             </p>
           </div>
 
@@ -69,8 +76,9 @@ function StudentLoginPage() {
                 />
                 <p className="mt-1 text-xs text-muted-foreground">Get this code from your teacher</p>
               </div>
+
               <div>
-                <Label>Your Student Number</Label>
+                <Label>Student Number</Label>
                 <Input
                   className="mt-1"
                   placeholder="e.g., SS2-001"
@@ -78,11 +86,25 @@ function StudentLoginPage() {
                   onChange={(e) => setStudentNumber(e.target.value)}
                 />
               </div>
+
+              <div>
+                <Label>Full Name</Label>
+                <Input
+                  className="mt-1"
+                  placeholder="e.g., Amina Yusuf"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Must match exactly what your teacher registered
+                </p>
+              </div>
+
               <Button
                 className="w-full"
                 size="lg"
                 onClick={handleStart}
-                disabled={busy || !accessCode.trim() || !studentNumber.trim()}
+                disabled={busy || !canStart}
               >
                 <LogIn className="h-5 w-5" />
                 {busy ? "Starting…" : "Start Exam"}

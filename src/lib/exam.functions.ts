@@ -189,12 +189,14 @@ export const studentStartExam = createServerFn({ method: "POST" })
       .object({
         access_code: z.string().min(1),
         student_number: z.string().min(1),
+        full_name: z.string().min(1),  // ← added
       })
       .parse(d),
   )
   .handler(async ({ data }) => {
     const code = data.access_code.trim().toUpperCase();
     const studentNum = data.student_number.trim();
+    const fullName = data.full_name.trim().toLowerCase();  // ← added
 
     const { data: exam } = await supabaseAdmin
       .from("exams")
@@ -219,6 +221,11 @@ export const studentStartExam = createServerFn({ method: "POST" })
       .eq("student_number", studentNum)
       .maybeSingle();
     if (!roster) throw new Error("Student number not found in roster");
+
+    // ← added: verify full name matches roster (case-insensitive)
+    if (roster.full_name.trim().toLowerCase() !== fullName) {
+      throw new Error("Full name does not match our records. Please check with your teacher.");
+    }
 
     // Get or create submission
     let { data: submission } = await supabaseAdmin
@@ -279,8 +286,6 @@ export const studentGetExam = createServerFn({ method: "GET" })
       .eq("exam_id", exam.id)
       .order("position");
 
-    // STRIP is_correct - never sent to client. (We selected only safe columns.)
-    // Shuffle deterministically per submission so students get different orders but stable across page reloads.
     const seed = sub.id;
     const seededShuffle = <T,>(arr: T[], salt: string): T[] => {
       const items = arr.map((v, i) => ({
@@ -348,7 +353,6 @@ export const studentSubmitExam = createServerFn({ method: "POST" })
     if (!sub) throw new Error("Submission not found");
     if (sub.submitted_at) throw new Error("Already submitted");
 
-    // Load all questions+correct options for this exam (server-side only)
     const { data: questions } = await supabaseAdmin
       .from("questions")
       .select("id, options(id, is_correct)")
