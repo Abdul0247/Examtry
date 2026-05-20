@@ -107,8 +107,11 @@ function CreateExamPage() {
           })),
         },
       });
-      toast.success(`Exam created. Access code: ${result.access_code}`);
-      navigate({ to: "/dashboard" });
+      toast.success(`Exam created! Access code: ${result.access_code}`, {
+  duration: 10000, // show for 10 seconds so teacher can copy it
+});
+navigate({ to: "/dashboard" });
+
     } catch (e) {
       toast.error((e as Error).message);
     } finally {

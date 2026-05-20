@@ -47,12 +47,13 @@ export const createExam = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => CreateExamInput.parse(input))
   .handler(async ({ context, data }) => {
-    const { supabase, userId } = context;
+    const { userId } = context;
 
-    // Generate unique access code (retry a few times)
+    // Use admin client server-side — auth is already verified by middleware
+    // Generate unique access code
     let code = genCode();
     for (let i = 0; i < 5; i++) {
-      const { data: existing } = await supabase
+      const { data: existing } = await supabaseAdmin
         .from("exams")
         .select("id")
         .eq("access_code", code)
@@ -61,7 +62,7 @@ export const createExam = createServerFn({ method: "POST" })
       code = genCode();
     }
 
-    const { data: exam, error: examErr } = await supabase
+    const { data: exam, error: examErr } = await supabaseAdmin
       .from("exams")
       .insert({
         teacher_id: userId,
@@ -78,10 +79,10 @@ export const createExam = createServerFn({ method: "POST" })
       .single();
     if (examErr || !exam) throw new Error(examErr?.message ?? "Failed to create exam");
 
-    // Insert questions + options
+    // Insert questions + options using admin client
     for (let qi = 0; qi < data.questions.length; qi++) {
       const q = data.questions[qi];
-      const { data: question, error: qErr } = await supabase
+      const { data: question, error: qErr } = await supabaseAdmin
         .from("questions")
         .insert({
           exam_id: exam.id,
@@ -91,7 +92,8 @@ export const createExam = createServerFn({ method: "POST" })
         })
         .select()
         .single();
-      if (qErr || !question) throw new Error(qErr?.message ?? "Failed to add question");
+      if (qErr || !question) throw new Error(qErr?.message ?? "Failed to save question " + (qi + 1));
+
       const optRows = q.options.map((o, oi) => ({
         question_id: question.id,
         text: o.text,
@@ -99,8 +101,8 @@ export const createExam = createServerFn({ method: "POST" })
         is_correct: o.is_correct,
         position: oi,
       }));
-      const { error: oErr } = await supabase.from("options").insert(optRows);
-      if (oErr) throw new Error(oErr.message);
+      const { error: oErr } = await supabaseAdmin.from("options").insert(optRows);
+      if (oErr) throw new Error("Failed to save options for question " + (qi + 1) + ": " + oErr.message);
     }
 
     if (data.roster.length > 0) {
@@ -109,8 +111,8 @@ export const createExam = createServerFn({ method: "POST" })
         full_name: r.full_name,
         student_number: r.student_number,
       }));
-      const { error: rErr } = await supabase.from("roster_students").insert(rows);
-      if (rErr) throw new Error(rErr.message);
+      const { error: rErr } = await supabaseAdmin.from("roster_students").insert(rows);
+      if (rErr) throw new Error("Failed to save roster: " + rErr.message);
     }
 
     return { id: exam.id, access_code: exam.access_code };
@@ -119,30 +121,36 @@ export const createExam = createServerFn({ method: "POST" })
 export const listExams = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
-    const { supabase } = context;
-    const { data: exams, error } = await supabase
+    const { userId } = context;
+
+    const { data: exams, error } = await supabaseAdmin
       .from("exams")
       .select("*")
+      .eq("teacher_id", userId)
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
 
-    // counts
     const enriched = await Promise.all(
       (exams ?? []).map(async (e) => {
         const [{ count: qc }, { count: sc }, { count: rc }] = await Promise.all([
-          supabase.from("questions").select("id", { count: "exact", head: true }).eq("exam_id", e.id),
-          supabase
+          supabaseAdmin.from("questions").select("id", { count: "exact", head: true }).eq("exam_id", e.id),
+          supabaseAdmin
             .from("submissions")
             .select("id", { count: "exact", head: true })
             .eq("exam_id", e.id)
             .not("submitted_at", "is", null),
-          supabase.from("roster_students").select("id", { count: "exact", head: true }).eq("exam_id", e.id),
+          supabaseAdmin.from("roster_students").select("id", { count: "exact", head: true }).eq("exam_id", e.id),
         ]);
         return { ...e, question_count: qc ?? 0, submission_count: sc ?? 0, roster_count: rc ?? 0 };
       }),
     );
 
-    const { data: profile } = await supabase.from("profiles").select("*").maybeSingle();
+    const { data: profile } = await supabaseAdmin
+      .from("profiles")
+      .select("*")
+      .eq("id", userId)
+      .maybeSingle();
+
     return { exams: enriched, profile };
   });
 
@@ -150,19 +158,23 @@ export const getExamResults = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => z.object({ exam_id: z.string().uuid() }).parse(d))
   .handler(async ({ context, data }) => {
-    const { supabase } = context;
-    const { data: exam, error: ee } = await supabase
+    const { userId } = context;
+
+    const { data: exam, error: ee } = await supabaseAdmin
       .from("exams")
       .select("*")
       .eq("id", data.exam_id)
+      .eq("teacher_id", userId) // ensure teacher owns this exam
       .single();
     if (ee || !exam) throw new Error("Exam not found");
-    const { data: subs } = await supabase
+
+    const { data: subs } = await supabaseAdmin
       .from("submissions")
       .select("*")
       .eq("exam_id", data.exam_id)
       .not("submitted_at", "is", null)
       .order("score", { ascending: false });
+
     return { exam, submissions: subs ?? [] };
   });
 
@@ -172,8 +184,18 @@ export const updateExamStatus = createServerFn({ method: "POST" })
     z.object({ exam_id: z.string().uuid(), status: z.enum(["draft", "active", "closed"]) }).parse(d),
   )
   .handler(async ({ context, data }) => {
-    const { supabase } = context;
-    const { error } = await supabase
+    const { userId } = context;
+
+    // Verify ownership before updating
+    const { data: exam } = await supabaseAdmin
+      .from("exams")
+      .select("id")
+      .eq("id", data.exam_id)
+      .eq("teacher_id", userId)
+      .maybeSingle();
+    if (!exam) throw new Error("Exam not found or access denied");
+
+    const { error } = await supabaseAdmin
       .from("exams")
       .update({ status: data.status })
       .eq("id", data.exam_id);
@@ -189,14 +211,14 @@ export const studentStartExam = createServerFn({ method: "POST" })
       .object({
         access_code: z.string().min(1),
         student_number: z.string().min(1),
-        full_name: z.string().min(1),  // ← added
+        full_name: z.string().min(1),
       })
       .parse(d),
   )
   .handler(async ({ data }) => {
     const code = data.access_code.trim().toUpperCase();
     const studentNum = data.student_number.trim();
-    const fullName = data.full_name.trim().toLowerCase();  // ← added
+    const fullName = data.full_name.trim().toLowerCase();
 
     const { data: exam } = await supabaseAdmin
       .from("exams")
@@ -222,7 +244,7 @@ export const studentStartExam = createServerFn({ method: "POST" })
       .maybeSingle();
     if (!roster) throw new Error("Student number not found in roster");
 
-    // ← added: verify full name matches roster (case-insensitive)
+    // Verify full name matches (case-insensitive)
     if (roster.full_name.trim().toLowerCase() !== fullName) {
       throw new Error("Full name does not match our records. Please check with your teacher.");
     }
@@ -250,7 +272,7 @@ export const studentStartExam = createServerFn({ method: "POST" })
         })
         .select()
         .single();
-      if (error || !created) throw new Error(error?.message ?? "Failed to start");
+      if (error || !created) throw new Error(error?.message ?? "Failed to start exam");
       submission = created;
     }
 
