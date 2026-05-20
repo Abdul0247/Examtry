@@ -1,0 +1,1 @@
+REVOKE ALL ON FUNCTION public.auto_close_exams() FROM public, anon, authenticated;
